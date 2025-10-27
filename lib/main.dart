@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import 'dart:async';
 
 void main() {
@@ -35,24 +36,32 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
   late FaceDetector _faceDetector;
   bool _isInitialized = false;
 
+  // PDF viewer variables
+  late PdfViewerController _pdfViewerController;
+
   // Face tracking variables
   Timer? _debounceTimer;
   Timer? _faceDetectionTimeoutTimer;
   Timer? _resetTimer;
   bool _faceDetected = false;
   String _lastMovement = 'none';
+  String _navigationStatus = 'ready'; // ready, navigating, failed
+  int _currentPdfPage = 1; // Track PDF page manually since pageNumber might not work
 
   // Frame throttling variables
   DateTime? _lastFaceDetectionTime;
   static const Duration _faceDetectionInterval = Duration(milliseconds: 700);
 
   // Movement thresholds
-  double _tiltThreshold = 8.0; // degrees
-  static const int _debounceMs = 600; // milliseconds
+  double _tiltThreshold = 5.0; // degrees (lowered for easier detection)
+  static const int _debounceMs = 400; // milliseconds (reduced for faster response)
 
   @override
   void initState() {
     super.initState();
+    _pdfViewerController = PdfViewerController();
+    _currentPdfPage = 1; // Start at page 1
+    print('PDF viewer controller initialized: $_pdfViewerController');
     _initializeApp();
   }
 
@@ -202,6 +211,69 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
     }
   }
 
+  void _scrollPdfHorizontally(double offset) {
+    try {
+      print('Attempting to scroll PDF by $offset');
+
+      // Update status
+      setState(() {
+        _navigationStatus = 'navigating';
+      });
+
+      // Get current page for debugging
+      int currentPage = _pdfViewerController.pageNumber;
+      print('Current page before navigation (controller): $currentPage');
+      print('Current page before navigation (manual): $_currentPdfPage');
+
+      // Update manual page tracking
+      if (offset < 0) {
+        // Scroll left - go to previous page
+        print('Going to previous page...');
+        if (_currentPdfPage > 1) {
+          _currentPdfPage--;
+          _pdfViewerController.jumpToPage(_currentPdfPage);
+          print('Jumped to page $_currentPdfPage');
+        } else {
+          print('Already at first page, cannot go back');
+        }
+      } else {
+        // Scroll right - go to next page
+        print('Going to next page...');
+        if (_currentPdfPage < 3) { // We know we have 3 pages
+          _currentPdfPage++;
+          _pdfViewerController.jumpToPage(_currentPdfPage);
+          print('Jumped to page $_currentPdfPage');
+        } else {
+          print('Already at last page, cannot go forward');
+        }
+      }
+
+      // Update the UI to show current page immediately
+      if (mounted) {
+        setState(() {
+          _navigationStatus = 'ready';
+        });
+        print('Page after navigation (manual): $_currentPdfPage');
+      }
+
+      print('PDF scrolled horizontally by $offset');
+    } catch (e) {
+      print('Error scrolling PDF: $e');
+      setState(() {
+        _navigationStatus = 'failed';
+      });
+
+      // Reset status after a delay
+      Future.delayed(const Duration(seconds: 1), () {
+        if (mounted) {
+          setState(() {
+            _navigationStatus = 'ready';
+          });
+        }
+      });
+    }
+  }
+
   void _setMovementDirection(String direction) {
     if (!mounted) return;
 
@@ -216,11 +288,19 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
         _lastMovement = direction;
       });
 
+      // Handle PDF scrolling for left/right movements
+      if (direction == 'left') {
+        _scrollPdfHorizontally(-200); // Scroll left by 200 pixels
+      } else if (direction == 'right') {
+        _scrollPdfHorizontally(200); // Scroll right by 200 pixels
+      }
+
       // Set timer to reset to 'none' after showing the movement
       _resetTimer = Timer(const Duration(milliseconds: 800), () {
         if (mounted) {
           setState(() {
             _lastMovement = 'none';
+            _navigationStatus = 'ready';
           });
         }
       });
@@ -265,19 +345,7 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
       }
     });
 
-    // Check vertical movement (up/down tilt) using absolute angles with dead zones
-    if (headEulerAngleX.abs() > _tiltThreshold) {
-      print('Vertical tilt detected: $headEulerAngleX (threshold: ${_tiltThreshold})');
-      if (headEulerAngleX > 0) {
-        // Head tilted down
-        _setMovementDirection('down');
-      } else {
-        // Head tilted up
-        _setMovementDirection('up');
-      }
-    }
-
-    // Check horizontal movement (left/right tilt) using absolute angles with dead zones
+    // Only check horizontal movement (left/right tilt) - no up/down as requested
     if (headEulerAngleY.abs() > _tiltThreshold) {
       print('Horizontal tilt detected: $headEulerAngleY (threshold: ${_tiltThreshold})');
       if (headEulerAngleY > 0) {
@@ -288,7 +356,7 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
         _setMovementDirection('left');
       }
     }
-  } // Added missing closing brace here
+  }
 
   void _showSettingsDialog() {
     showDialog(
@@ -359,16 +427,34 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
         color: Colors.grey[100],
         child: Stack(
           children: [
-            // Simple background instead of PDF
-            const Center(
-              child: Text(
-                'Face Tracking Test\nMove your head to control arrows',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.grey,
-                ),
+            // PDF Viewer as background
+            Positioned.fill(
+              child: SfPdfViewer.asset(
+                'assets/sample.pdf',
+                controller: _pdfViewerController,
+                enableTextSelection: false,
+                canShowScrollHead: false,
+                canShowScrollStatus: false,
+                canShowPaginationDialog: false,
+                interactionMode: PdfInteractionMode.pan,
+                scrollDirection: PdfScrollDirection.vertical,
+                initialZoomLevel: 1.0,
+                onDocumentLoaded: (details) {
+                  print('PDF loaded successfully! Total pages: ${details.document.pages.count}');
+                  if (mounted) {
+                    setState(() {
+                      _navigationStatus = 'ready';
+                    });
+                  }
+                },
+                onPageChanged: (details) {
+                  print('Page changed from ${details.oldPageNumber} to ${details.newPageNumber}');
+                  if (mounted) {
+                    setState(() {
+                      _currentPdfPage = details.newPageNumber;
+                    });
+                  }
+                },
               ),
             ),
 
@@ -439,7 +525,7 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      'Face Control Instructions:',
+                      'PDF Face Control Instructions:',
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 16,
@@ -448,19 +534,11 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
                     ),
                     SizedBox(height: 8),
                     Text(
-                      '• Tilt head UP to scroll up',
+                      '• Tilt head LEFT to scroll to previous page',
                       style: TextStyle(color: Colors.white, fontSize: 14),
                     ),
                     Text(
-                      '• Tilt head DOWN to scroll down',
-                      style: TextStyle(color: Colors.white, fontSize: 14),
-                    ),
-                    Text(
-                      '• Tilt head LEFT to scroll left',
-                      style: TextStyle(color: Colors.white, fontSize: 14),
-                    ),
-                    Text(
-                      '• Tilt head RIGHT to scroll right',
+                      '• Tilt head RIGHT to scroll to next page',
                       style: TextStyle(color: Colors.white, fontSize: 14),
                     ),
                     Text(
@@ -472,7 +550,7 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
               ),
             ),
 
-            // Large control arrows in center for testing
+            // Large control arrows in center for testing (only left/right for PDF)
             Positioned(
               top: 200,
               left: 0,
@@ -480,23 +558,7 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Up arrow
-                  Container(
-                    width: 80,
-                    height: 80,
-                    decoration: BoxDecoration(
-                      color: _lastMovement == 'up' ? Colors.green : Colors.grey,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.arrow_upward,
-                      size: 40,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-
-                  // Left and Right arrows in a row
+                  // Left and Right arrows in a row (for PDF navigation)
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
@@ -513,7 +575,7 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
                           color: Colors.white,
                         ),
                       ),
-                      const SizedBox(width: 40),
+                      const SizedBox(width: 60),
                       Container(
                         width: 80,
                         height: 80,
@@ -529,22 +591,6 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 20),
-
-                  // Down arrow
-                  Container(
-                    width: 80,
-                    height: 80,
-                    decoration: BoxDecoration(
-                      color: _lastMovement == 'down' ? Colors.green : Colors.grey,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.arrow_downward,
-                      size: 40,
-                      color: Colors.white,
-                    ),
-                  ),
 
                   const SizedBox(height: 30),
                   Text(
@@ -552,6 +598,25 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
                     style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    'Current Page: $_currentPdfPage',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    'Status: $_navigationStatus',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: _navigationStatus == 'ready' ? Colors.green :
+                             _navigationStatus == 'navigating' ? Colors.orange : Colors.red,
                     ),
                   ),
                 ],
@@ -562,11 +627,63 @@ class _FaceTrackingTestState extends State<FaceTrackingTest> {
             Positioned(
               top: 20,
               left: 20,
-              child: FloatingActionButton(
-                mini: true,
-                onPressed: _showSettingsDialog,
-                child: const Icon(Icons.settings),
-                tooltip: 'Settings',
+              child: Row(
+                children: [
+                  FloatingActionButton(
+                    mini: true,
+                    onPressed: () {
+                      print('Manual next page test');
+                      if (_currentPdfPage < 3) {
+                        setState(() {
+                          _currentPdfPage++;
+                          _navigationStatus = 'navigating';
+                        });
+                        _pdfViewerController.jumpToPage(_currentPdfPage);
+                        Future.delayed(const Duration(milliseconds: 200), () {
+                          if (mounted) {
+                            setState(() {
+                              _navigationStatus = 'ready';
+                            });
+                            print('Manual next - Current page: $_currentPdfPage');
+                          }
+                        });
+                      }
+                    },
+                    child: const Icon(Icons.arrow_forward),
+                    tooltip: 'Next Page',
+                  ),
+                  const SizedBox(width: 10),
+                  FloatingActionButton(
+                    mini: true,
+                    onPressed: () {
+                      print('Manual previous page test');
+                      if (_currentPdfPage > 1) {
+                        setState(() {
+                          _currentPdfPage--;
+                          _navigationStatus = 'navigating';
+                        });
+                        _pdfViewerController.jumpToPage(_currentPdfPage);
+                        Future.delayed(const Duration(milliseconds: 200), () {
+                          if (mounted) {
+                            setState(() {
+                              _navigationStatus = 'ready';
+                            });
+                            print('Manual previous - Current page: $_currentPdfPage');
+                          }
+                        });
+                      }
+                    },
+                    child: const Icon(Icons.arrow_back),
+                    tooltip: 'Previous Page',
+                  ),
+                  const SizedBox(width: 10),
+                  FloatingActionButton(
+                    mini: true,
+                    onPressed: _showSettingsDialog,
+                    child: const Icon(Icons.settings),
+                    tooltip: 'Settings',
+                  ),
+                ],
               ),
             ),
           ],
