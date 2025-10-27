@@ -8,7 +8,7 @@ This POC has been committed to GitHub. To get started:
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/ios-face-tracking-poc.git
+git clone https://github.com/taran-bansal/ios-face-tracking-poc.git
 cd ios-face-tracking-poc
 
 # Install dependencies
