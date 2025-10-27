@@ -1,0 +1,577 @@
+import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'dart:async';
+
+void main() {
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Face Tracking Test',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        useMaterial3: true,
+      ),
+      home: const FaceTrackingTest(),
+    );
+  }
+}
+
+class FaceTrackingTest extends StatefulWidget {
+  const FaceTrackingTest({super.key});
+
+  @override
+  State<FaceTrackingTest> createState() => _FaceTrackingTestState();
+}
+
+class _FaceTrackingTestState extends State<FaceTrackingTest> {
+  CameraController? _cameraController;
+  late FaceDetector _faceDetector;
+  bool _isInitialized = false;
+
+  // Face tracking variables
+  Timer? _debounceTimer;
+  Timer? _faceDetectionTimeoutTimer;
+  Timer? _resetTimer;
+  bool _faceDetected = false;
+  String _lastMovement = 'none';
+
+  // Frame throttling variables
+  DateTime? _lastFaceDetectionTime;
+  static const Duration _faceDetectionInterval = Duration(milliseconds: 700);
+
+  // Movement thresholds
+  double _tiltThreshold = 8.0; // degrees
+  static const int _debounceMs = 600; // milliseconds
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    print('Starting app initialization...');
+
+    // Initialize camera and face detection only
+    _initializeCameraAndFaceDetection();
+
+    print('App initialization complete');
+    setState(() {
+      _isInitialized = true;
+    });
+  }
+
+  Future<void> _initializeCameraAndFaceDetection() async {
+    try {
+      print('Initializing camera...');
+      final cameras = await availableCameras().timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {
+          print('Camera enumeration timed out');
+          throw TimeoutException('Camera enumeration timed out');
+        },
+      );
+
+      if (cameras.isEmpty) {
+        print('No cameras available');
+        return;
+      }
+
+      final frontCamera = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.first,
+      );
+
+      print('Using camera: ${frontCamera.name}');
+      _cameraController = CameraController(
+        frontCamera,
+        ResolutionPreset.low, // Lower resolution for better performance
+        enableAudio: false,
+      );
+
+      // Add timeout to camera initialization
+      await _cameraController!.initialize().timeout(
+        const Duration(seconds: 15),
+        onTimeout: () {
+          print('Camera controller initialization timed out');
+          throw TimeoutException('Camera controller initialization timed out');
+        },
+      );
+
+      await _cameraController!.startImageStream(_processCameraImage);
+      print('Camera initialized successfully');
+    } catch (e) {
+      print('Error initializing camera: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Camera initialization failed: $e\nFace tracking disabled.'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+
+    // Always initialize face detector
+    _initializeFaceDetector();
+  }
+
+  void _initializeFaceDetector() {
+    try {
+      _faceDetector = FaceDetector(
+        options: FaceDetectorOptions(
+          enableContours: false,
+          enableLandmarks: false,
+          enableClassification: false,
+          enableTracking: false, // Disable tracking for simpler processing
+        ),
+      );
+      print('Face detector initialized successfully');
+    } catch (e) {
+      print('Error initializing face detector: $e');
+    }
+  }
+
+  void _processCameraImage(CameraImage image) async {
+    // Throttle face detection to prevent UI freezing
+    final now = DateTime.now();
+    if (_lastFaceDetectionTime != null &&
+        now.difference(_lastFaceDetectionTime!) < _faceDetectionInterval) {
+      return;
+    }
+    _lastFaceDetectionTime = now;
+
+    try {
+      final inputImage = _convertCameraImageToInputImage(image);
+      if (inputImage != null) {
+        try {
+          // Add timeout to face detection
+          final faces = await _faceDetector.processImage(inputImage).timeout(
+            const Duration(milliseconds: 500),
+            onTimeout: () {
+              print('Face detection timed out');
+              return <Face>[];
+            },
+          );
+
+          if (faces.isNotEmpty) {
+            print('Face detected! Processing movement...');
+            _handleFaceDetection(faces.first);
+          } else {
+            // No face detected - update status
+            if (mounted) {
+              setState(() {
+                _faceDetected = false;
+              });
+            }
+            // Cancel timeout timer since no face is detected
+            _faceDetectionTimeoutTimer?.cancel();
+          }
+        } catch (e) {
+          print('Face detection error: $e');
+        }
+      }
+    } catch (e) {
+      print('Error processing camera image: $e');
+    }
+  }
+
+  InputImage? _convertCameraImageToInputImage(CameraImage image) {
+    try {
+      // For iOS, try using the standard BGRA format
+      final bytes = image.planes.first.bytes;
+
+      final inputImageMetadata = InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: InputImageRotation.rotation90deg,
+        format: InputImageFormat.bgra8888,
+        bytesPerRow: image.planes.first.bytesPerRow,
+      );
+
+      return InputImage.fromBytes(bytes: bytes, metadata: inputImageMetadata);
+    } catch (e) {
+      print('Error converting camera image: $e');
+      return null;
+    }
+  }
+
+  void _setMovementDirection(String direction) {
+    if (!mounted) return;
+
+    // Only update if direction actually changed to avoid unnecessary UI updates
+    if (_lastMovement != direction) {
+      print('Movement direction changed from ${_lastMovement} to $direction');
+
+      // Cancel any existing reset timer
+      _resetTimer?.cancel();
+
+      setState(() {
+        _lastMovement = direction;
+      });
+
+      // Set timer to reset to 'none' after showing the movement
+      _resetTimer = Timer(const Duration(milliseconds: 800), () {
+        if (mounted) {
+          setState(() {
+            _lastMovement = 'none';
+          });
+        }
+      });
+    }
+  }
+
+  void _handleFaceDetection(Face face) {
+    // Cancel previous debounce timer
+    _debounceTimer?.cancel();
+
+    // Start new debounce timer
+    _debounceTimer = Timer(const Duration(milliseconds: _debounceMs), () {
+      if (mounted) {
+        _processFaceMovements(face);
+      }
+    });
+  }
+
+  void _processFaceMovements(Face face) {
+    if (!mounted) {
+      print('Widget not mounted, skipping movement processing');
+      return;
+    }
+
+    final headEulerAngleX = face.headEulerAngleX ?? 0.0; // Up-down tilt
+    final headEulerAngleY = face.headEulerAngleY ?? 0.0; // Left-right tilt
+
+    print('Processing face movement - X: $headEulerAngleX, Y: $headEulerAngleY');
+
+    // Update face detection status
+    _faceDetected = true;
+
+    // Cancel existing timeout timer
+    _faceDetectionTimeoutTimer?.cancel();
+
+    // Start new timeout timer (reset face detection after 3 seconds of no detection)
+    _faceDetectionTimeoutTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) {
+        setState(() {
+          _faceDetected = false;
+        });
+      }
+    });
+
+    // Check vertical movement (up/down tilt) using absolute angles with dead zones
+    if (headEulerAngleX.abs() > _tiltThreshold) {
+      print('Vertical tilt detected: $headEulerAngleX (threshold: ${_tiltThreshold})');
+      if (headEulerAngleX > 0) {
+        // Head tilted down
+        _setMovementDirection('down');
+      } else {
+        // Head tilted up
+        _setMovementDirection('up');
+      }
+    }
+
+    // Check horizontal movement (left/right tilt) using absolute angles with dead zones
+    if (headEulerAngleY.abs() > _tiltThreshold) {
+      print('Horizontal tilt detected: $headEulerAngleY (threshold: ${_tiltThreshold})');
+      if (headEulerAngleY > 0) {
+        // Head tilted right
+        _setMovementDirection('right');
+      } else {
+        // Head tilted left
+        _setMovementDirection('left');
+      }
+    }
+  } // Added missing closing brace here
+
+  void _showSettingsDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Face Control Settings'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                title: const Text('Tilt Sensitivity'),
+                subtitle: Slider(
+                  value: _tiltThreshold,
+                  min: 2.0,
+                  max: 20.0,
+                  divisions: 18,
+                  label: '${_tiltThreshold.toStringAsFixed(1)}°',
+                  onChanged: (value) {
+                    setState(() {
+                      _tiltThreshold = value;
+                    });
+                  },
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Adjust tilt sensitivity.\nLower values = more sensitive',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    print('Disposing face tracking test...');
+    _debounceTimer?.cancel();
+    _faceDetectionTimeoutTimer?.cancel();
+    _resetTimer?.cancel();
+    _cameraController?.dispose();
+    _faceDetector.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_isInitialized) {
+      return const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    return Scaffold(
+      body: Container(
+        color: Colors.grey[100],
+        child: Stack(
+          children: [
+            // Simple background instead of PDF
+            const Center(
+              child: Text(
+                'Face Tracking Test\nMove your head to control arrows',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey,
+                ),
+              ),
+            ),
+
+            // Camera preview overlay (small, top-right corner)
+            Positioned(
+              top: 20,
+              right: 20,
+              width: 120,
+              height: 160,
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.blue, width: 2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Stack(
+                    children: [
+                      _cameraController != null &&
+                              _cameraController!.value.isInitialized
+                          ? CameraPreview(_cameraController!)
+                          : const Center(
+                              child: Text(
+                                'Camera\nInitializing...',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ),
+                      // Face detection status indicator
+                      Positioned(
+                        bottom: 5,
+                        right: 5,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: _faceDetected ? Colors.green : Colors.red,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            _faceDetected ? 'Face' : 'No Face',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+            // Instructions overlay
+            Positioned(
+              bottom: 100,
+              left: 20,
+              right: 20,
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Face Control Instructions:',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      '• Tilt head UP to scroll up',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    Text(
+                      '• Tilt head DOWN to scroll down',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    Text(
+                      '• Tilt head LEFT to scroll left',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    Text(
+                      '• Tilt head RIGHT to scroll right',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    Text(
+                      '• Keep face in camera view',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // Large control arrows in center for testing
+            Positioned(
+              top: 200,
+              left: 0,
+              right: 0,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  // Up arrow
+                  Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      color: _lastMovement == 'up' ? Colors.green : Colors.grey,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.arrow_upward,
+                      size: 40,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+
+                  // Left and Right arrows in a row
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        width: 80,
+                        height: 80,
+                        decoration: BoxDecoration(
+                          color: _lastMovement == 'left' ? Colors.green : Colors.grey,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.arrow_back,
+                          size: 40,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 40),
+                      Container(
+                        width: 80,
+                        height: 80,
+                        decoration: BoxDecoration(
+                          color: _lastMovement == 'right' ? Colors.green : Colors.grey,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.arrow_forward,
+                          size: 40,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+
+                  // Down arrow
+                  Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      color: _lastMovement == 'down' ? Colors.green : Colors.grey,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.arrow_downward,
+                      size: 40,
+                      color: Colors.white,
+                    ),
+                  ),
+
+                  const SizedBox(height: 30),
+                  Text(
+                    'Last Movement: ${_lastMovement.toUpperCase()}',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // Settings button
+            Positioned(
+              top: 20,
+              left: 20,
+              child: FloatingActionButton(
+                mini: true,
+                onPressed: _showSettingsDialog,
+                child: const Icon(Icons.settings),
+                tooltip: 'Settings',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
