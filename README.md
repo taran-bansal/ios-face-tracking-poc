@@ -2,6 +2,22 @@
 
 A Flutter application that demonstrates real-time face tracking using head movements. **Perfect for testing face detection on iOS devices!**
 
+## 📁 Repository Setup
+
+This POC has been committed to GitHub. To get started:
+
+```bash
+# Clone the repository
+git clone https://github.com/YOUR_USERNAME/ios-face-tracking-poc.git
+cd ios-face-tracking-poc
+
+# Install dependencies
+flutter pub get
+
+# Run on iOS (make sure camera permissions are enabled in Settings > Privacy & Security > Camera)
+flutter run
+```
+
 ## Features
 
 - **Face Tracking Test**: Simple interface with large visual arrows that respond to head movements
